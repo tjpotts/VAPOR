@@ -1,7 +1,5 @@
-#define ACCEPT_USE_OF_DEPRECATED_PROJ_API_H 1
-
 #include <iostream>
-#include <proj_api.h>
+#include <proj.h>
 #include <vapor/ResourcePath.h>
 #include <vapor/Proj4API.h>
 
@@ -10,8 +8,7 @@ using namespace Wasp;
 
 Proj4API::Proj4API()
 {
-    _pjSrc = NULL;
-    _pjDst = NULL;
+    _P = NULL;
 
     string path = GetSharePath("proj");
     if (!path.empty()) {
@@ -27,27 +24,17 @@ Proj4API::Proj4API()
 
 Proj4API::~Proj4API()
 {
-    if (_pjSrc) pj_free(_pjSrc);
-    if (_pjDst) pj_free(_pjDst);
+    if (_P) proj_destroy(_P);
 }
 
-int Proj4API::_Initialize(string srcdef, string dstdef, void **pjSrc, void **pjDst) const
+int Proj4API::_Initialize(string srcdef, string dstdef, PJ **P) const
 {
-    *pjSrc = NULL;
-    *pjDst = NULL;
+    *P = NULL;
 
-    if (!srcdef.empty()) {
-        *pjSrc = pj_init_plus(srcdef.c_str());
-        if (!*pjSrc) {
-            SetErrMsg("pj_init_plus(%s) : %s", srcdef.c_str(), ProjErr().c_str());
-            return (-1);
-        }
-    }
-
-    if (!dstdef.empty()) {
-        *pjDst = pj_init_plus(dstdef.c_str());
-        if (!*pjDst) {
-            SetErrMsg("pj_init_plus(%s) : %s", dstdef.c_str(), ProjErr().c_str());
+    if (!srcdef.empty() && !dstdef.empty()) {
+        *P = proj_create_crs_to_crs(PJ_DEFAULT_CTX, srcdef.c_str(), dstdef.c_str(), NULL);
+        if (!*P) {
+            SetErrMsg("proj_create_crs_to_crs(PJ_DEFAULT_CTX, %s, %s, NULL) : %s", srcdef.c_str(), dstdef.c_str(), ProjErr().c_str());
             return (-1);
         }
     }
@@ -56,6 +43,8 @@ int Proj4API::_Initialize(string srcdef, string dstdef, void **pjSrc, void **pjD
     // If either the source or destination definition string is
     // not provided - but not both - generate a "latlong" conversion
     //
+
+    /* TODO: Replace this
     if (srcdef.empty() && !dstdef.empty()) {
         *pjSrc = pj_latlong_from_proj(*pjDst);
         if (!*pjSrc) {
@@ -71,114 +60,124 @@ int Proj4API::_Initialize(string srcdef, string dstdef, void **pjSrc, void **pjD
     } else {
         // NULL transform. Transforms will be no-ops
     }
+    */
     return (0);
 }
 
 int Proj4API::Initialize(string srcdef, string dstdef)
 {
-    if (_pjSrc) pj_free(_pjSrc);
-    if (_pjDst) pj_free(_pjDst);
-    _pjSrc = NULL;
-    _pjDst = NULL;
+    if (_P) proj_destroy(_P);
+    _P = NULL;
 
-    return (_Initialize(srcdef, dstdef, &_pjSrc, &_pjDst));
+    return (_Initialize(srcdef, dstdef, &_P));
 }
 
 bool Proj4API::IsLatLonSrc() const
 {
-    if (!_pjSrc) return (false);
-
-    return ((bool)pj_is_latlong(_pjSrc));
+  return !IsGeocentSrc();
 }
 
 bool Proj4API::IsLatLonDst() const
 {
-    if (!_pjDst) return (false);
-
-    return ((bool)pj_is_latlong(_pjDst));
+  return !IsGeocentDst();
 }
 
 bool Proj4API::IsGeocentSrc() const
 {
-    if (!_pjSrc) return (false);
+    PJ *srcP = proj_get_source_crs(PJ_DEFAULT_CTX, _P);
+    if (!srcP) return (false);
 
-    return ((bool)pj_is_geocent(_pjSrc));
+    PJ_COORDINATE_SYSTEM_TYPE type = proj_cs_get_type(PJ_DEFAULT_CTX, srcP);
+    bool is_cartesian = type == PJ_CS_TYPE_CARTESIAN;
+
+    proj_destroy(srcP);
+    return is_cartesian;
 }
 
 bool Proj4API::IsGeocentDst() const
 {
-    if (!_pjDst) return (false);
+    PJ *dstP = proj_get_target_crs(PJ_DEFAULT_CTX, _P);
+    if (!dstP) return (false);
 
-    return ((bool)pj_is_geocent(_pjDst));
+    PJ_COORDINATE_SYSTEM_TYPE type = proj_cs_get_type(PJ_DEFAULT_CTX, dstP);
+    bool is_cartesian = type == PJ_CS_TYPE_CARTESIAN;
+
+    proj_destroy(dstP);
+    return is_cartesian;
 }
 
 string Proj4API::GetSrcStr() const
 {
-    if (!_pjSrc) return ("");
+    PJ *srcP = proj_get_source_crs(PJ_DEFAULT_CTX, _P);
+    if (!srcP) return ("");
 
-    return ((string)pj_get_def(_pjSrc, 0));
+    return ((string)proj_as_proj_string(PJ_DEFAULT_CTX, srcP, PJ_PROJ_5, NULL));
 }
 
 string Proj4API::GetDstStr() const
 {
-    if (!_pjDst) return ("");
+    PJ *dstP = proj_get_target_crs(PJ_DEFAULT_CTX, _P);
+    if (!dstP) return ("");
 
-    return ((string)pj_get_def(_pjDst, 0));
+    return ((string)proj_as_proj_string(PJ_DEFAULT_CTX, dstP, PJ_PROJ_5, NULL));
 }
 
 int Proj4API::Transform(double *x, double *y, size_t n, int offset) const { return (Proj4API::Transform(x, y, NULL, n, offset)); }
 
-int Proj4API::_Transform(void *pjSrc, void *pjDst, double *x, double *y, double *z, size_t n, int offset) const
+int Proj4API::_Transform(PJ *P, double *x, double *y, double *z, size_t n, int offset) const
 {
     // no-op
     //
-    if (pjSrc == NULL || pjDst == NULL) return (0);
+    if (P == NULL) return (0);
 
     //
-    // Convert from degrees to radians if source is in
-    // geographic coordinates
+    // Convert from degrees to radians if the transformation expects radians input
     //
-    if (pj_is_latlong(pjSrc)) {
+    if (proj_angular_input(P, PJ_FWD)) {
         if (x) {
-            for (size_t i = 0; i < n; i++) { x[i * (size_t)offset] *= DEG_TO_RAD; }
+            for (size_t i = 0; i < n; i++) { x[i * (size_t)offset] = proj_torad(x[i * (size_t)offset]); }
         }
         if (y) {
-            for (size_t i = 0; i < n; i++) { y[i * (size_t)offset] *= DEG_TO_RAD; }
+            for (size_t i = 0; i < n; i++) { y[i * (size_t)offset] = proj_torad(y[i * (size_t)offset]); }
         }
         if (z) {
-            for (size_t i = 0; i < n; i++) { z[i * (size_t)offset] *= DEG_TO_RAD; }
+            for (size_t i = 0; i < n; i++) { z[i * (size_t)offset] = proj_torad(z[i * (size_t)offset]); }
         }
     }
 
-    int rc = pj_transform(pjSrc, pjDst, n, offset, x, y, NULL);
-    if (rc != 0) {
-        SetErrMsg("pj_transform() : %s", ProjErr().c_str());
+    int rc = proj_trans_generic(P, PJ_FWD,
+                                x, sizeof(double), n,
+                                y, sizeof(double), n,
+                                z, sizeof(double), n,
+                                NULL, 0, 0);
+
+    if (rc == 0) {
+        SetErrMsg("proj_trans_generic() : %s", ProjErr().c_str());
         return (-1);
     }
 
     //
-    // Convert from radians degrees if destination is in
-    // geographic coordinates
+    // Convert from radians to degrees if transformation provides radians output
     //
-    if (pj_is_latlong(pjDst)) {
+    if (proj_angular_output(P, PJ_FWD)) {
         if (x) {
-            for (size_t i = 0; i < n; i++) { x[i * (size_t)offset] *= RAD_TO_DEG; }
+            for (size_t i = 0; i < n; i++) { x[i * (size_t)offset] *= proj_todeg(x[i * (size_t)offset]); }
         }
         if (y) {
-            for (size_t i = 0; i < n; i++) { y[i * (size_t)offset] *= RAD_TO_DEG; }
+            for (size_t i = 0; i < n; i++) { y[i * (size_t)offset] = proj_todeg(y[i * (size_t)offset]); }
         }
         if (z) {
-            for (size_t i = 0; i < n; i++) { z[i * (size_t)offset] *= RAD_TO_DEG; }
+            for (size_t i = 0; i < n; i++) { z[i * (size_t)offset] = proj_todeg(z[i * (size_t)offset]); }
         }
     }
     return (0);
 }
 
-int Proj4API::Transform(double *x, double *y, double *z, size_t n, int offset) const { return (_Transform(_pjSrc, _pjDst, x, y, z, n, offset)); }
+int Proj4API::Transform(double *x, double *y, double *z, size_t n, int offset) const { return (_Transform(_P, x, y, z, n, offset)); }
 
 int Proj4API::Transform(float *x, float *y, size_t n, int offset) const { return (Proj4API::Transform(x, y, NULL, n, offset)); }
 
-int Proj4API::_Transform(void *pjSrc, void *pjDst, float *x, float *y, float *z, size_t n, int offset) const
+int Proj4API::_Transform(PJ *P, float *x, float *y, float *z, size_t n, int offset) const
 {
     double *xd = NULL;
     double *yd = NULL;
@@ -197,7 +196,7 @@ int Proj4API::_Transform(void *pjSrc, void *pjDst, float *x, float *y, float *z,
         for (size_t i = 0; i < n; i++) zd[i] = z[i * offset];
     }
 
-    int rc = _Transform(pjSrc, pjDst, xd, yd, zd, n, 1);
+    int rc = _Transform(P, xd, yd, zd, n, 1);
 
     if (xd) {
         for (size_t i = 0; i < n; i++) x[i * offset] = xd[i];
@@ -214,35 +213,33 @@ int Proj4API::_Transform(void *pjSrc, void *pjDst, float *x, float *y, float *z,
     return (rc);
 }
 
-int Proj4API::Transform(float *x, float *y, float *z, size_t n, int offset) const { return (Proj4API::_Transform(_pjSrc, _pjDst, x, y, z, n, offset)); }
+int Proj4API::Transform(float *x, float *y, float *z, size_t n, int offset) const { return (Proj4API::_Transform(_P, x, y, z, n, offset)); }
 
 int Proj4API::Transform(string srcdef, string dstdef, double *x, double *y, double *z, size_t n, int offset) const
 {
-    void *pjSrc = NULL;
-    void *pjDst = NULL;
+    PJ *P = NULL;
 
-    int rc = _Initialize(srcdef, dstdef, &pjSrc, &pjDst);
+    int rc = _Initialize(srcdef, dstdef, &P);
     if (rc < 0) return (rc);
 
-    return (_Transform(pjSrc, pjDst, x, y, z, n, offset));
+    return (_Transform(P, x, y, z, n, offset));
 
     return (0);
 }
 
 int Proj4API::Transform(string srcdef, string dstdef, float *x, float *y, float *z, size_t n, int offset) const
 {
-    void *pjSrc = NULL;
-    void *pjDst = NULL;
+    PJ *P = NULL;
 
-    int rc = _Initialize(srcdef, dstdef, &pjSrc, &pjDst);
+    int rc = _Initialize(srcdef, dstdef, &P);
     if (rc < 0) return (rc);
 
-    return (_Transform(pjSrc, pjDst, x, y, z, n, offset));
+    return (_Transform(P, x, y, z, n, offset));
 
     return (0);
 }
 
-string Proj4API::ProjErr() const { return (pj_strerrno(*pj_get_errno_ref())); }
+string Proj4API::ProjErr() const { return (proj_context_errno_string(PJ_DEFAULT_CTX, proj_context_errno(PJ_DEFAULT_CTX))); }
 
 void Proj4API::Clamp(double *x, double *y, size_t n, int offset) const
 {

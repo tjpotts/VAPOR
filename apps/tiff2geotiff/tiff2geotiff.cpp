@@ -18,8 +18,6 @@
 #include <ctype.h>
 #include "vapor/VAssert.h"
 
-#define ACCEPT_USE_OF_DEPRECATED_PROJ_API_H 1
-
 /* GeoTIFF overrides */
 
 #ifdef WIN32
@@ -29,7 +27,7 @@
     #include "geotiff/geo_keyp.h"
     #include "geotiff/xtiffio.h"
     #include "geotiff/cpl_serv.h"
-    #include "proj_api.h"
+    #include "proj.h"
 #else
     #include "geotiff.h"
     #include "geo_normalize.h"
@@ -37,7 +35,7 @@
     #include "geo_keyp.h"
     #include "xtiffio.h"
     #include "cpl_serv.h"
-    #include "proj_api.h"
+    #include "proj.h"
 #endif
 
 #ifdef WIN32
@@ -371,36 +369,46 @@ static void InstallGeoTIFF(TIFF *out)
 //
 static int applyCorners(float lonlat[4], float relPos[4], TIFF *out)
 {
-    void * p;
+    const char * latLongProjString = "+proj=latlong +ellps=sphere";
+    PJ *p;
     double modelPixelScale[3] = {0., 0., 0.};
     double tiePoint[6] = {0., 0., 0., 0., 0., 0.};
-    p = pj_init_plus(p4string);
+    p = proj_create_crs_to_crs(PJ_DEFAULT_CTX, latLongProjString, p4string, NULL);
 
     if (!p && !ignore) {
         // Invalid string. Get the error code:
-        int *pjerrnum = pj_get_errno_ref();
-        fprintf(stderr, "Invalid Proj4 string %s; message:\n %s\n", p4string, pj_strerrno(*pjerrnum));
+        int pjerrnum = proj_context_errno(PJ_DEFAULT_CTX);
+        fprintf(stderr, "Invalid Proj4 string %s; message:\n %s\n", p4string, proj_context_errno_string(PJ_DEFAULT_CTX, pjerrnum));
         return -1;
     }
     if (p) {
         // reproject latlon to specified coord projection.
         // unless it's already a lat/lon projection
+        PJ *dstP = proj_get_target_crs(PJ_DEFAULT_CTX, p);
+        if (!dstP) return (false);
+
+        PJ_COORDINATE_SYSTEM_TYPE type = proj_cs_get_type(PJ_DEFAULT_CTX, dstP);
+        bool is_cartesian = type == PJ_CS_TYPE_CARTESIAN;
+        proj_destroy(dstP);
+
         double dbextents[4];
-        if (pj_is_latlong(static_cast<projPJ>(p))) {
+        if (!is_cartesian) {
             for (int j = 0; j < 4; j++) { dbextents[j] = lonlat[j]; }
         } else {
-            // Must convert to radians:
-            const double DEG2RAD = 3.141592653589793 / 180.;
-            const char * latLongProjString = "+proj=latlong +ellps=sphere";
-            projPJ       latlon_p = pj_init_plus(latLongProjString);
-            // convert to radians...
-            for (int j = 0; j < 4; j++) dbextents[j] = lonlat[j] * DEG2RAD;
+            // Convert to radians if the transformation expects radians input
+            if (proj_angular_input(p, PJ_FWD)) {
+                for (int j = 0; j < 4; j++) dbextents[j] = proj_torad(lonlat[j]);
+            }
             // convert the latlons to coordinates in the projection.
-            double dummy[1] = {0.0};
-            int    rc = pj_transform(latlon_p, static_cast<projPJ>(p), 2, 2, dbextents, dbextents + 1, dummy);
+            int rc = proj_trans_generic(p, PJ_FWD,
+                                        &dbextents[0], sizeof(double), 1,
+                                        &dbextents[1], sizeof(double), 1,
+                                        &dbextents[2], sizeof(double), 1,
+                                        &dbextents[3], sizeof(double), 1);
+
             if (rc && !ignore) {
-                int *pjerrnum = pj_get_errno_ref();
-                fprintf(stderr, "Error converting lonlat to projection\n %s\n", pj_strerrno(*pjerrnum));
+                int pjerrnum = proj_context_errno(PJ_DEFAULT_CTX);
+                fprintf(stderr, "Error converting lonlat to projection\n %s\n", proj_context_errno_string(PJ_DEFAULT_CTX, pjerrnum));
                 return (-1);
             }
         }

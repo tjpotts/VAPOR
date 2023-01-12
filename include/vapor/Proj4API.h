@@ -1,6 +1,7 @@
 #ifndef _Proj4API_h_
 #define _Proj4API_h_
 
+#include <proj.h>
 #include <vapor/MyBase.h>
 
 namespace VAPoR {
@@ -121,14 +122,13 @@ public:
     bool IsCylindrical() const;
 
 private:
-    void *_pjSrc;
-    void *_pjDst;
+    PJ *_P;
 
-    int _Initialize(string srcdef, string dstdef, void **pjSrc, void **pjDst) const;
+    int _Initialize(string srcdef, string dstdef, PJ **P) const;
 
-    int _Transform(void *pjSrc, void *pjDst, double *x, double *y, double *z, size_t n, int offset) const;
+    int _Transform(PJ *P, double *x, double *y, double *z, size_t n, int offset) const;
 
-    int _Transform(void *pjSrc, void *pjDst, float *x, float *y, float *z, size_t n, int offset) const;
+    int _Transform(PJ *P, float *x, float *y, float *z, size_t n, int offset) const;
 };
 };    // namespace VAPoR
 
